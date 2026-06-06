@@ -1,0 +1,138 @@
+# =============================================================================
+# config.yaml — Single source of truth for the synthetic data pipeline
+# No hardcoded paths, epsilons, seeds, or hyperparameters anywhere in src/
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global settings
+# -----------------------------------------------------------------------------
+global:
+  seed: 42
+  test_size: 0.2          # fraction of data held out as test set (sacred — never seen by generators)
+  log_level: INFO
+
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
+paths:
+  raw_data:     data/raw
+  processed:    data/processed
+  synthetic:    data/synthetic
+  outputs:      outputs/results
+  plots:        outputs/plots
+
+# -----------------------------------------------------------------------------
+# Datasets
+# -----------------------------------------------------------------------------
+datasets:
+
+  diabetes_130us:
+    raw_file:       data/raw/diabetes_130us/diabetic_data.csv
+    processed_dir:  data/processed/diabetes_130us
+    synthetic_dir:  data/synthetic/diabetes_130us
+    target_col:     readmitted
+    drop_cols:
+      - encounter_id
+      - patient_nbr
+    missing_values:
+      - "?"           # dataset-specific missing value marker
+
+  home_credit:
+    raw_file:       data/raw/home_credit_default_risk/application_train.csv
+    processed_dir:  data/processed/home_credit
+    synthetic_dir:  data/synthetic/home_credit
+    target_col:     TARGET
+    drop_cols:
+      - SK_ID_CURR
+    missing_values: []
+
+  acs_income:
+    raw_file:       data/raw/acs_income/acs_income_ca_2018.csv
+    processed_dir:  data/processed/acs_income
+    synthetic_dir:  data/synthetic/acs_income
+    target_col:     PINCP
+    drop_cols: []
+    missing_values: []
+
+# -----------------------------------------------------------------------------
+# Generators
+# -----------------------------------------------------------------------------
+generators:
+  list:
+    - ctgan
+    - tvae
+    - copulagan
+
+  # Shared hyperparameters (can be overridden per generator below)
+  default:
+    epochs:      300
+    batch_size:  500
+
+  ctgan:
+    epochs:         300
+    batch_size:     500
+    generator_dim:  [256, 256]
+    discriminator_dim: [256, 256]
+
+  tvae:
+    epochs:         300
+    batch_size:     500
+    compress_dims:  [128, 128]
+    decompress_dims: [128, 128]
+
+  copulagan:
+    epochs:         300
+    batch_size:     500
+
+# -----------------------------------------------------------------------------
+# Differential privacy
+# -----------------------------------------------------------------------------
+differential_privacy:
+  enabled: true
+  epsilons:
+    - 1
+    - 5
+    - 10
+  delta: 1e-5             # standard choice: 1/N where N ~ dataset size; 1e-5 is a safe default
+  max_grad_norm: 1.0      # DP-SGD clipping threshold
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+evaluation:
+
+  utility:
+    tstr:
+      model:          xgboost
+      n_estimators:   100
+      max_depth:      6
+      learning_rate:  0.1
+      metrics:
+        - roc_auc
+        - f1_weighted
+        - accuracy
+
+  privacy:
+    mia:
+      model:          xgboost   # shadow model for the attacker
+      n_estimators:   100
+      attack_samples: 2000      # number of train + test records fed to attacker
+    dcr:
+      sample_size:    5000      # rows to sample for distance computation (full set is slow)
+    nndr:
+      sample_size:    5000
+
+# -----------------------------------------------------------------------------
+# Reporting
+# -----------------------------------------------------------------------------
+reporting:
+  output_file:    outputs/results/full_benchmark.csv
+  utility_file:   outputs/results/utility_scores.csv
+  privacy_file:   outputs/results/privacy_scores.csv
+  plots:
+    tradeoff_curves:      outputs/plots/tradeoff_curves
+    correlation_heatmaps: outputs/plots/correlation_heatmaps
+    tstr_comparisons:     outputs/plots/tstr_comparisons
+  pareto:
+    utility_metric: roc_auc   # metric used to define Pareto frontier
+    privacy_metric: mia_auc   # lower is better (closer to 0.5 = random = private)
