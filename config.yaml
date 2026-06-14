@@ -27,32 +27,170 @@ paths:
 datasets:
 
   diabetes_130us:
-    raw_file:       data/raw/diabetes_130us/diabetic_data.csv
+    raw_file:       data/raw/diabetes_130us.csv
     processed_dir:  data/processed/diabetes_130us
     synthetic_dir:  data/synthetic/diabetes_130us
     target_col:     readmitted
     drop_cols:
       - encounter_id
       - patient_nbr
+      # >80% null — too sparse to impute
+      - weight
+      - max_glu_serum
+      - A1Cresult
+      # >40% null + high cardinality categorical — drop rather than impute
+      - payer_code
+      - medical_specialty
+      # Constant columns — zero variance, no information
+      - examide
+      - citoglipton
     missing_values:
       - "?"           # dataset-specific missing value marker
+    high_null_impute:
+      # Columns with moderate nulls — impute rather than drop
+      race: mode
+      diag_1: mode
+      diag_2: mode
+      diag_3: mode
+    icd_cols:
+      # ICD-9 code columns — group by first 3 characters before encoding
+      - diag_1
+      - diag_2
+      - diag_3
+    ordinal_cols:
+      # Drug dosage columns — ordinal categories, not numeric
+      - metformin
+      - repaglinide
+      - nateglinide
+      - chlorpropamide
+      - glimepiride
+      - acetohexamide
+      - glipizide
+      - glyburide
+      - tolbutamide
+      - pioglitazone
+      - rosiglitazone
+      - acarbose
+      - miglitol
+      - troglitazone
+      - tolazamide
+      - insulin
+      - glyburide-metformin
+      - glipizide-metformin
+      - glimepiride-pioglitazone
+      - metformin-rosiglitazone
+      - metformin-pioglitazone
 
   home_credit:
-    raw_file:       data/raw/home_credit_default_risk/application_train.csv
+    raw_file:       data/raw/home_credit_default_risk.csv
     processed_dir:  data/processed/home_credit
     synthetic_dir:  data/synthetic/home_credit
     target_col:     TARGET
     drop_cols:
+      # Identifier
       - SK_ID_CURR
+      # >65% null
+      - OWN_CAR_AGE
+      # Structural property block — ~48% of rows null together
+      - APARTMENTS_AVG
+      - BASEMENTAREA_AVG
+      - YEARS_BEGINEXPLUATATION_AVG
+      - YEARS_BUILD_AVG
+      - COMMONAREA_AVG
+      - ELEVATORS_AVG
+      - ENTRANCES_AVG
+      - FLOORSMAX_AVG
+      - FLOORSMIN_AVG
+      - LANDAREA_AVG
+      - LIVINGAPARTMENTS_AVG
+      - LIVINGAREA_AVG
+      - NONLIVINGAPARTMENTS_AVG
+      - NONLIVINGAREA_AVG
+      - APARTMENTS_MODE
+      - BASEMENTAREA_MODE
+      - YEARS_BEGINEXPLUATATION_MODE
+      - YEARS_BUILD_MODE
+      - COMMONAREA_MODE
+      - ELEVATORS_MODE
+      - ENTRANCES_MODE
+      - FLOORSMAX_MODE
+      - FLOORSMIN_MODE
+      - LANDAREA_MODE
+      - LIVINGAPARTMENTS_MODE
+      - LIVINGAREA_MODE
+      - NONLIVINGAPARTMENTS_MODE
+      - NONLIVINGAREA_MODE
+      - FONDKAPREMONT_MODE
+      - HOUSETYPE_MODE
+      - TOTALAREA_MODE
+      - WALLSMATERIAL_MODE
+      - EMERGENCYSTATE_MODE
+      - APARTMENTS_MEDI
+      - BASEMENTAREA_MEDI
+      - YEARS_BEGINEXPLUATATION_MEDI
+      - YEARS_BUILD_MEDI
+      - COMMONAREA_MEDI
+      - ELEVATORS_MEDI
+      - ENTRANCES_MEDI
+      - FLOORSMAX_MEDI
+      - FLOORSMIN_MEDI
+      - LANDAREA_MEDI
+      - LIVINGAPARTMENTS_MEDI
+      - LIVINGAREA_MEDI
+      - NONLIVINGAPARTMENTS_MEDI
+      - NONLIVINGAREA_MEDI
+    days_employed_sentinel: 365243   # sentinel value meaning "unemployed"
+    log_transform_cols:
+      # Heavy right skew — log1p transform before generation
+      - AMT_INCOME_TOTAL
+      - AMT_CREDIT
+      - AMT_ANNUITY
+      - AMT_GOODS_PRICE
+    median_impute_cols:
+      # Moderate nulls — impute with median
+      - EXT_SOURCE_1
+      - EXT_SOURCE_2
+      - EXT_SOURCE_3
+      - AMT_REQ_CREDIT_BUREAU_HOUR
+      - AMT_REQ_CREDIT_BUREAU_DAY
+      - AMT_REQ_CREDIT_BUREAU_WEEK
+      - AMT_REQ_CREDIT_BUREAU_MON
+      - AMT_REQ_CREDIT_BUREAU_QRT
+      - AMT_REQ_CREDIT_BUREAU_YEAR
+      - OBS_30_CNT_SOCIAL_CIRCLE
+      - DEF_30_CNT_SOCIAL_CIRCLE
+      - OBS_60_CNT_SOCIAL_CIRCLE
+      - DEF_60_CNT_SOCIAL_CIRCLE
+      - CNT_FAM_MEMBERS
+      - DAYS_LAST_PHONE_CHANGE
+      - AMT_GOODS_PRICE
+      - AMT_ANNUITY
+    mode_impute_cols:
+      # Categorical nulls — impute with unknown category
+      - NAME_TYPE_SUITE
+      - OCCUPATION_TYPE
     missing_values: []
 
   acs_income:
-    raw_file:       data/raw/acs_income/acs_income_ca_2018.csv
+    raw_file:       data/raw/acs_income_ca_2018.csv
     processed_dir:  data/processed/acs_income
     synthetic_dir:  data/synthetic/acs_income
     target_col:     PINCP
     drop_cols: []
     missing_values: []
+    categorical_cols:
+      # Integer-coded census columns — treat as categorical despite numeric dtype
+      - COW
+      - SCHL
+      - MAR
+      - RELP
+      - SEX
+      - RAC1P
+      - POBP
+    occp_col: OCCP            # occupation code — group to SOC major groups (first 2 digits)
+    continuous_cols:
+      - AGEP
+      - WKHP
 
 # -----------------------------------------------------------------------------
 # Generators

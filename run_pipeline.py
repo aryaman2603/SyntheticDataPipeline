@@ -85,23 +85,26 @@ def bootstrap_directories(config: dict, logger: logging.Logger) -> None:
 def run_ingest(config: dict, datasets: list[str], logger: logging.Logger) -> None:
     """
     Layer 1: Load raw CSVs, clean, encode, split into train/test, write meta.json.
-    Placeholder — to be implemented in Stage 2.
     """
+    from src.ingestion import LOADER_MAP
+ 
     logger.info("=" * 60)
     logger.info("STAGE 1 — Data Ingestion & Preprocessing")
     logger.info("=" * 60)
-
+ 
     for name in datasets:
         logger.info(f"  [{name}] Loading and preprocessing ...")
-        # TODO (Stage 2): instantiate loader, call load(), preprocess(), split()
-        # from src.ingestion.diabetes_loader import DiabetesLoader
-        # from src.ingestion.home_credit_loader import HomeCreditLoader
-        # from src.ingestion.acs_income_loader import ACSIncomeLoader
-        # loader = <loader_class>(config)
-        # loader.load()
-        # loader.split()
-        logger.info(f"  [{name}] ✓ placeholder complete")
-
+        loader_cls = LOADER_MAP.get(name)
+        if loader_cls is None:
+            logger.error(f"  [{name}] No loader found — skipping")
+            continue
+        loader = loader_cls(config)
+        train_df, test_df = loader.run()
+        logger.info(
+            f"  [{name}] ✓ done — "
+            f"train: {len(train_df):,} rows, test: {len(test_df):,} rows"
+        )
+ 
     logger.info("Stage 1 complete.\n")
 
 
