@@ -8,7 +8,7 @@ Every generator must implement:
   - load(path)               → restores a trained model from disk
 
 The base class provides:
-  - prepare_dataframe()      → casts category cols to object (SDV requirement)
+  - prepare_dataframe()      → handles category dtype for SDV compatibility
   - build_metadata()         → builds SDV Metadata from DataFrame dtypes
   - save_synthetic()         → writes synthetic CSV with standard naming
   - load_train_data()        → reads train.csv and restores categorical dtypes
@@ -34,6 +34,7 @@ class BaseGenerator(ABC):
         self.dataset_name = dataset_name
         self.ds_config = config["datasets"][dataset_name]
         self.model = None
+        self._int_coded_cat_cols: list[str] = []
 
     # ------------------------------------------------------------------
     # Abstract interface — every generator must implement these
@@ -61,30 +62,47 @@ class BaseGenerator(ABC):
 
     def prepare_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        SDV's synthesizers do not accept pandas 'category' dtype — they
-        require 'object'. 
+        SDV's synthesizers do not accept pandas 'category' dtype.
+
+        Two cases for category columns:
+          - String-valued (e.g. 'No/Steady/Up/Down') → cast to object.
+          - Integer-coded (e.g. ACS census codes 1.0, 2.0) → cast to float.
+            We then mark them as sdtype='categorical' in build_metadata()
+            via self._int_coded_cat_cols. Casting to object would cause
+            SDV's type detection to fail on numeric strings.
         """
         df = df.copy()
+        self._int_coded_cat_cols = []
+
         for col in df.select_dtypes(include=["category"]).columns:
-            df[col] = df[col].astype(object)
+            sample_vals = df[col].dropna().unique()
+            try:
+                pd.to_numeric(sample_vals)
+                # Numeric-coded categorical — cast to float, track for metadata override
+                df[col] = pd.to_numeric(df[col].astype(str), errors="coerce")
+                self._int_coded_cat_cols.append(col)
+            except (ValueError, TypeError):
+                # String-valued categorical — cast to object
+                df[col] = df[col].astype(object)
+
         return df
 
     def build_metadata(self, train_df: pd.DataFrame) -> Metadata:
         """
         Build an SDV Metadata object from the DataFrame dtypes.
-        Expects train_df to have already been passed through
-        prepare_dataframe() so all categoricals are object dtype.
+        Expects train_df to have already been passed through prepare_dataframe().
 
-        object columns  → sdtype='categorical'
-        numeric columns → sdtype='numerical'
+        object columns            → sdtype='categorical'
+        numeric columns           → sdtype='numerical'
+        integer-coded cat columns → sdtype='categorical' (override)
         """
         metadata = Metadata()
         metadata.detect_table_from_dataframe(
-            data=train_df,
             table_name=self.dataset_name,
+            data=train_df,
         )
 
-        # Override: ensure object columns are marked as categorical
+        # Override: object columns → categorical
         for col in train_df.select_dtypes(include=["object"]).columns:
             metadata.update_column(
                 table_name=self.dataset_name,
@@ -92,7 +110,7 @@ class BaseGenerator(ABC):
                 sdtype="categorical",
             )
 
-        # Override: ensure numeric columns are marked as numerical
+        # Override: numeric columns → numerical
         for col in train_df.select_dtypes(include=["number"]).columns:
             metadata.update_column(
                 table_name=self.dataset_name,
@@ -100,17 +118,23 @@ class BaseGenerator(ABC):
                 sdtype="numerical",
             )
 
+        # Override: integer-coded categoricals → categorical despite numeric dtype
+        for col in self._int_coded_cat_cols:
+            if col in train_df.columns:
+                metadata.update_column(
+                    table_name=self.dataset_name,
+                    column_name=col,
+                    sdtype="categorical",
+                )
+
         logger.info(
             f"[{self.dataset_name}] Metadata built — "
-            f"{len(train_df.columns)} columns"
+            f"{len(train_df.columns)} columns "
+            f"({len(self._int_coded_cat_cols)} int-coded categoricals)"
         )
         return metadata
 
-    def save_synthetic(
-        self,
-        synthetic_df: pd.DataFrame,
-        label: str,
-    ) -> Path:
+    def save_synthetic(self, synthetic_df: pd.DataFrame, label: str) -> Path:
         """
         Write synthetic CSV to data/synthetic/<dataset>/<label>.csv
         label examples: 'ctgan_nodp', 'tvae_eps1', 'copulagan_eps10'
@@ -150,6 +174,6 @@ class BaseGenerator(ABC):
 
         logger.info(
             f"[{self.dataset_name}] Loaded train data: "
-            f"{df.shape[0]:,} rows × {df.shape[1]} cols"
+            f"{df.shape[0]:,} rows x {df.shape[1]} cols"
         )
         return df
