@@ -25,7 +25,26 @@ from src.ingestion.base_loader import BaseLoader
 
 logger = logging.getLogger(__name__)
 
-
+ICD9_CHAPTERS = [
+    (1,   139,  "infectious"),
+    (140, 239,  "neoplasms"),
+    (240, 279,  "endocrine"),
+    (280, 289,  "blood"),
+    (290, 319,  "mental"),
+    (320, 389,  "nervous"),
+    (390, 459,  "circulatory"),
+    (460, 519,  "respiratory"),
+    (520, 579,  "digestive"),
+    (580, 629,  "genitourinary"),
+    (630, 679,  "pregnancy"),
+    (680, 709,  "skin"),
+    (710, 739,  "musculoskeletal"),
+    (740, 759,  "congenital"),
+    (760, 779,  "perinatal"),
+    (780, 799,  "symptoms"),
+    (800, 899,  "injury"),
+    (900, 999,  "external"),
+    ]
 class DiabetesLoader(BaseLoader):
 
     def __init__(self, config: dict):
@@ -122,18 +141,26 @@ class DiabetesLoader(BaseLoader):
     # Helpers
     # ------------------------------------------------------------------
 
+  
+    
     @staticmethod
     def _group_icd_code(code: str | float) -> str | float:
         """
-        Truncate ICD-9 code to 3-character disease category prefix.
-        Handles numeric codes (250.83 → '250'), V-codes (V27 → 'V27'),
-        E-codes (E11 → 'E11'), and NaN passthrough.
+        Map ICD-9 code to one of 21 top-level disease chapter labels.
+        Reduces cardinality from ~700 unique codes to ~21 groups.
         """
         if pd.isna(code):
             return code
         code = str(code).strip()
-        # V-codes and E-codes: keep first 3 chars
-        if code.startswith(("V", "E")):
-            return code[:3]
-        # Numeric codes: take digits before the decimal point, max 3 chars
-        return code.split(".")[0][:3]
+        if code.startswith("V"):
+            return "supplementary"
+        if code.startswith("E"):
+            return "external_causes"
+        try:
+            numeric = int(float(code.split(".")[0]))
+            for low, high, label in ICD9_CHAPTERS:
+                if low <= numeric <= high:
+                    return label
+            return "other"
+        except (ValueError, TypeError):
+            return "other"

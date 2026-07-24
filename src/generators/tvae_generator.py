@@ -39,7 +39,7 @@ class TVAEGenerator(BaseGenerator):
             batch_size=self.gen_config["batch_size"],
             compress_dims=tuple(self.gen_config["compress_dims"]),
             decompress_dims=tuple(self.gen_config["decompress_dims"]),
-            enable_gpu=False,  # set to True on cloud GPU
+            enable_gpu=True,  # set to True on cloud GPU
             verbose=True,
         )
         self.model.fit(train_df)

@@ -37,7 +37,7 @@ class CopulaGANGenerator(BaseGenerator):
             metadata=metadata,
             epochs=self.gen_config["epochs"],
             batch_size=self.gen_config["batch_size"],
-            enable_gpu=False,  # set to True on cloud GPU
+            enable_gpu=True,  # set to True on cloud GPU
             verbose=True,
         )
         self.model.fit(train_df)

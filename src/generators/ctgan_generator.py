@@ -39,7 +39,7 @@ class CTGANGenerator(BaseGenerator):
             batch_size=self.gen_config["batch_size"],
             generator_dim=tuple(self.gen_config["generator_dim"]),
             discriminator_dim=tuple(self.gen_config["discriminator_dim"]),
-            enable_gpu=False,  # set to True on cloud GPU
+            enable_gpu=True,  # set to True on cloud GPU
             verbose=True,
         )
         self.model.fit(train_df)
