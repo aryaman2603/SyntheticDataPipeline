@@ -1,6 +1,5 @@
 # Privacy-Preserving Synthetic Data Pipeline — Project Context
 
-> This document captures the full planning context for this project. Use it as a briefing document when starting implementation in a new chat window.
 
 ---
 
@@ -230,6 +229,4 @@ synthetic-data-privacy-pipeline/
 
 ---
 
-## 8. Prompt to Paste in New Chat
 
-> I am building a **privacy-preserving synthetic data generation and benchmarking pipeline** in Python. I have completed all planning and design. Please read the attached context document fully before we begin. We will implement the project stage by stage in this order: (1) config + skeleton, (2) data ingestion, (3) non-DP generators, (4) evaluators, (5) DP generators, (6) reporting. We are starting at **Stage 1**. The full project context including architecture, folder structure, datasets, and design principles is in the document above. Let's begin.
