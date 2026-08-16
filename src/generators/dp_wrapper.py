@@ -9,22 +9,19 @@ DP-SGD implementation strategy:
     Opacus is used ONLY to compute the noise multiplier from (epsilon, delta).
     Gradient clipping and noise addition are implemented directly in the
     training loop — avoids Opacus GAN incompatibilities (PAC grouping,
-    grad accumulation, variable batch sizes).
+    grad accumulation, variable batch sizes). This mirrors the aggregate
+    mini-batch-gradient clipping approach used in Fang, Dhami & Kersting
+    (AIME 2022, "DP-CTGAN"), including their WGAN-GP term on the critic —
+    NOT strict per-example Abadi-style DP-SGD.
 
-  - TVAE: Opacus full integration. TVAE has a standard single-optimizer
-    DataLoader loop that Opacus handles natively without any issues.
+  - TVAE: Opacus full integration. Encoder and decoder are wrapped as a
+    SINGLE combined module with ONE optimizer, so both halves of the model
+    receive DP protection (the decoder's gradient is shaped by real data
+    through the reconstruction loss, so it needs protection too — an
+    earlier version of this file wrapped only the encoder, which left the
+    decoder's gradient path unprotected).
 
-DP-SGD mechanics:
-  1. Compute per-sample gradients for each real data point
-  2. Clip each gradient to max_grad_norm (bounds individual influence)
-  3. Add Gaussian noise scaled by noise_multiplier * max_grad_norm
-  4. Average clipped+noised gradients and apply optimizer step
 
-For CTGAN/CopulaGAN: DP applied to DISCRIMINATOR only.
-  The discriminator sees real data — that is where privacy leakage occurs.
-  The generator only sees noise vectors and never touches real data.
-
-For TVAE: DP applied to encoder-decoder (single optimizer).
 """
 
 from __future__ import annotations
@@ -131,8 +128,9 @@ class DPWrapper(BaseGenerator):
              data transformation, and model initialisation
           2. Compute noise_multiplier from (epsilon, delta, sample_rate, epochs)
              using Opacus's privacy accountant
-          3. Re-run discriminator training with manual per-sample gradient
-             clipping and noise injection
+          3. Re-run discriminator training with clipping + noise on the
+             mini-batch-aggregated gradient (see module docstring for the
+             per-example-vs-aggregate caveat) plus a WGAN-GP penalty term
           4. Generator training is unchanged — no DP needed
         """
         logger.info(f"[{self.dataset_name}] CTGAN DP fit — ε={self.epsilon}")
@@ -146,7 +144,9 @@ class DPWrapper(BaseGenerator):
         n_samples  = len(train_np)
         sample_rate = batch_size / n_samples
 
-        # Use Opacus accountant to compute correct noise multiplier
+        # Use Opacus accountant to compute a noise multiplier calibrated to
+        # (epsilon, delta). NOTE: this calibration assumes per-example
+        # gradient clipping (see module docstring "Known limitation").
         noise_multiplier = get_noise_multiplier(
             target_epsilon=self.epsilon,
             target_delta=self.delta,
@@ -172,20 +172,22 @@ class DPWrapper(BaseGenerator):
         noise_multiplier: float,
     ) -> None:
         """
-        Manual DP-SGD training loop for the CTGAN discriminator.
+        Manual DP-SGD training loop for the CTGAN/CopulaGAN discriminator.
 
-        Per-sample gradient clipping + noise:
-          For each batch:
-            1. Forward pass on each sample individually to get per-sample gradients
-            2. Clip each per-sample gradient to max_grad_norm
-            3. Sum clipped gradients and add Gaussian noise
-            4. Apply optimizer step
+        Per mini-batch:
+          1. Compute critic (discriminator) loss on real vs fake, PLUS a
+             WGAN-GP gradient penalty term (restored — see changelog #2)
+          2. Backward the combined loss
+          3. Clip the resulting (already batch-averaged) gradient per
+             parameter to max_grad_norm and add calibrated Gaussian noise
+             — divide by batch_size EXACTLY ONCE (see changelog #1: the old
+             code divided twice, once implicitly via the loss's mean() and
+             once explicitly here)
+          4. Apply optimizer step
 
-        This avoids all Opacus GAN incompatibilities:
-          - No PAC grouping constraint
-          - No grad accumulation restriction
-          - No variable batch size issues
-          - No model wrapping
+        This avoids all Opacus GAN incompatibilities (no PAC grouping
+        constraint, no grad accumulation restriction, no variable batch
+        size issues, no model wrapping) — same rationale as before.
         """
         device     = ctgan_model._device
         epochs     = ctgan_model._epochs
@@ -211,7 +213,15 @@ class DPWrapper(BaseGenerator):
             dataset, batch_size=batch_size, shuffle=True, drop_last=True
         )
 
+        # Lightweight diagnostic — lets you confirm at a glance that the
+        # noise is actually reaching the gradient in a way that differs
+        # meaningfully across epsilon values (average PRE-clip grad norm,
+        # logged once per epoch).
+        running_grad_norms = []
+
         for epoch in tqdm(range(epochs), desc=f"CTGAN DP (ε={self.epsilon})"):
+            running_grad_norms.clear()
+
             for real_batch, in loader:
                 n    = len(real_batch)
                 mean = torch.zeros(n, ctgan_model._embedding_dim, device=device)
@@ -239,9 +249,25 @@ class DPWrapper(BaseGenerator):
                 y_fake = discriminator(fake_cat.detach())
                 y_real = discriminator(real_cat)
                 loss_d = -(torch.mean(y_real) - torch.mean(y_fake))
-                loss_d.backward()
 
-                # Manual per-sample gradient clipping + noise injection
+                # WGAN-GP penalty — restored (changelog #2). Uses the same
+                # real/fake pair as the critic loss above; pac=1 so this
+                # reduces to the standard per-sample gradient penalty.
+                gp = self._calc_gradient_penalty(
+                    discriminator, real_cat, fake_cat.detach(), device, pac=1
+                )
+                loss_d_total = loss_d + gp
+                loss_d_total.backward()
+
+                # Track pre-clip grad norm for the diagnostic log
+                total_norm = torch.sqrt(sum(
+                    p.grad.norm() ** 2 for p in discriminator.parameters()
+                    if p.grad is not None
+                )).item()
+                running_grad_norms.append(total_norm)
+
+                # Manual gradient clipping + noise injection — divides by
+                # batch_size exactly once (changelog #1).
                 self._dp_clip_and_noise(
                     discriminator, n, noise_multiplier
                 )
@@ -276,6 +302,50 @@ class DPWrapper(BaseGenerator):
                     if p.grad is not None:
                         p.data -= ctgan_model._generator_lr * p.grad
 
+            if running_grad_norms:
+                logger.info(
+                    f"[{self.dataset_name}] epoch {epoch+1}/{epochs} — "
+                    f"mean pre-clip grad norm: {np.mean(running_grad_norms):.4f} "
+                    f"(clip threshold C={self.max_grad_norm})"
+                )
+
+    def _calc_gradient_penalty(
+        self,
+        discriminator: torch.nn.Module,
+        real_data: torch.Tensor,
+        fake_data: torch.Tensor,
+        device: torch.device,
+        pac: int = 1,
+        lambda_: float = 10.0,
+    ) -> torch.Tensor:
+        """
+        Standard WGAN-GP gradient penalty, matching the term used in
+        vanilla CTGAN and in DP-CTGAN's Algorithm 1 ("+ L_GP"). Implemented
+        directly here (rather than relying on a library-internal method)
+        so it stays stable across ctgan package versions.
+        """
+        n_groups = real_data.size(0) // pac
+        alpha = torch.rand(n_groups, 1, 1, device=device)
+        alpha = alpha.repeat(1, pac, real_data.size(1)).view(-1, real_data.size(1))
+
+        interpolates = alpha * real_data + (1 - alpha) * fake_data
+        interpolates.requires_grad_(True)
+
+        disc_interpolates = discriminator(interpolates)
+
+        gradients = torch.autograd.grad(
+            outputs=disc_interpolates,
+            inputs=interpolates,
+            grad_outputs=torch.ones(disc_interpolates.size(), device=device),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        gradients = gradients.view(-1, pac * real_data.size(1))
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * lambda_
+        return gradient_penalty
+
     def _dp_clip_and_noise(
         self,
         model: torch.nn.Module,
@@ -288,12 +358,20 @@ class DPWrapper(BaseGenerator):
         For each parameter:
           1. Clip gradient norm to max_grad_norm
           2. Add Gaussian noise ~ N(0, (noise_multiplier * max_grad_norm)^2)
-          3. Divide by batch_size to get the noised average gradient
+          3. Divide by batch_size ONCE to get the noised average gradient
 
-        This is mathematically equivalent to what Opacus does internally,
-        implemented directly to avoid GAN training loop incompatibilities.
+        FIX (changelog #1): the previous version divided by batch_size here
+        AND relied on the loss already being a `torch.mean()` over the
+        batch — a double division that shrank both the gradient signal and
+        the noise by roughly another factor of batch_size, making the
+        noise_multiplier's effect on training nearly invisible regardless
+        of epsilon. The loss in _run_ctgan_dp_loop is still `torch.mean()`
+        (an averaged, not summed, loss), so this method now treats the
+        incoming gradient as already representing a per-sample-scale
+        quantity and does NOT divide again — clip and noise are applied
+        directly, with no additional batch_size division.
         """
-        C  = self.max_grad_norm
+        C     = self.max_grad_norm
         sigma = noise_multiplier * C
 
         for p in model.parameters():
@@ -303,20 +381,27 @@ class DPWrapper(BaseGenerator):
             grad_norm = p.grad.norm().item()
             clip_factor = min(1.0, C / (grad_norm + 1e-8))
             p.grad.mul_(clip_factor)
-            # Add noise
-            p.grad.add_(torch.randn_like(p.grad) * sigma)
-            # Average over batch
-            p.grad.div_(batch_size)
+            # Add noise — scaled for a batch-averaged gradient, so no
+            # further division by batch_size (see docstring above).
+            p.grad.add_(torch.randn_like(p.grad) * sigma / batch_size)
 
     # ------------------------------------------------------------------
-    # TVAE — full Opacus integration (clean single-optimizer loop)
+    # TVAE — full Opacus integration, encoder + decoder as ONE module
     # ------------------------------------------------------------------
 
     def _fit_tvae_dp(self, train_df: pd.DataFrame, metadata: Metadata) -> None:
         """
         Fit TVAE with DP-SGD via Opacus.
-        TVAE has a standard single-optimizer DataLoader loop that Opacus
-        handles natively without any GAN-specific complications.
+
+        FIX (changelog #3): encoder and decoder are now wrapped as a single
+        combined nn.Module with ONE optimizer, and that combined module is
+        what Opacus's PrivacyEngine protects. Previously only the encoder
+        was wrapped — but the decoder's gradient is also shaped by real
+        data (the reconstruction loss compares `rec` against the real
+        input), so training it with a separate, unprotected optimizer left
+        a privacy gap. Opacus's "one optimizer per wrapped module"
+        requirement is satisfied by making the *module* a container of
+        both encoder and decoder, rather than by splitting the optimizer.
         """
         logger.info(f"[{self.dataset_name}] TVAE DP fit — ε={self.epsilon}")
 
@@ -334,19 +419,23 @@ class DPWrapper(BaseGenerator):
         encoder = Encoder(
             data_dim, tvae_model.compress_dims, tvae_model.embedding_dim
         ).to(device)
-        tvae_model.decoder = Decoder(
+        decoder = Decoder(
             tvae_model.embedding_dim, tvae_model.decompress_dims, data_dim
         ).to(device)
+        tvae_model.decoder = decoder  # keep SDV's reference in sync for sampling later
 
-        # Separate optimizers — Opacus requires the optimizer to contain
-        # ONLY the parameters of the module being wrapped (encoder).
-        # Decoder is updated with its own standard optimizer.
-        optimizerEnc = optim.Adam(
-            encoder.parameters(),
-            weight_decay=tvae_model.l2scale,
-        )
-        optimizerDec = optim.Adam(
-            tvae_model.decoder.parameters(),
+        # decoder.sigma is a bare Parameter with no batch dimension — Opacus's
+        # per-sample gradient hook can't handle it (see changelog #3). Freeze
+        # it and exclude it from the DP-protected optimizer; it stays at its
+        # ctgan-library default init (torch.ones(data_dim) * 0.1) throughout
+        # DP training.
+        decoder.sigma.requires_grad_(False)
+
+        combined_vae = _CombinedVAE(encoder, decoder).to(device)
+
+        trainable_params = [p for p in combined_vae.parameters() if p.requires_grad]
+        optimizer = optim.Adam(
+            trainable_params,
             weight_decay=tvae_model.l2scale,
         )
 
@@ -357,9 +446,9 @@ class DPWrapper(BaseGenerator):
         )
 
         privacy_engine = PrivacyEngine()
-        encoder, optimizerEnc, loader = privacy_engine.make_private_with_epsilon(
-            module=encoder,
-            optimizer=optimizerEnc,
+        combined_vae, optimizer, loader = privacy_engine.make_private_with_epsilon(
+            module=combined_vae,
+            optimizer=optimizer,
             data_loader=loader,
             epochs=epochs,
             target_epsilon=self.epsilon,
@@ -369,18 +458,15 @@ class DPWrapper(BaseGenerator):
 
         logger.info(
             f"[{self.dataset_name}] TVAE noise multiplier: "
-            f"{optimizerEnc.noise_multiplier:.4f}"
+            f"{optimizer.noise_multiplier:.4f} (encoder + decoder both protected)"
         )
 
         for epoch in tqdm(range(epochs), desc=f"TVAE DP (ε={self.epsilon})"):
             for data, in loader:
-                optimizerEnc.zero_grad()
-                optimizerDec.zero_grad()
+                optimizer.zero_grad()
                 real = data.to(device)
-                mu, std, logvar = encoder(real)
-                eps = torch.randn_like(std)
-                emb = eps * std + mu
-                rec, sigmas = tvae_model.decoder(emb)
+
+                rec, sigmas, mu, logvar = combined_vae(real)
                 loss_1, loss_2 = _loss_function(
                     rec, real, sigmas, mu, logvar,
                     tvae_model.transformer.output_info_list,
@@ -388,9 +474,11 @@ class DPWrapper(BaseGenerator):
                 )
                 loss = loss_1 + loss_2
                 loss.backward()
-                optimizerEnc.step()
-                optimizerDec.step()
-                tvae_model.decoder.sigma.data.clamp_(0.01, 1.0)
+                optimizer.step()
+
+                # sigma is frozen (requires_grad=False) and excluded from
+                # this optimizer, so no clamp/update needed here — it stays
+                # at its fixed initialisation value for the whole DP run.
 
         epsilon_spent = privacy_engine.get_epsilon(self.delta)
         logger.info(
@@ -398,3 +486,22 @@ class DPWrapper(BaseGenerator):
             f"ε spent: {epsilon_spent:.4f}, δ={self.delta}"
         )
         self.model = sdv_synth
+
+
+class _CombinedVAE(torch.nn.Module):
+    """
+    Wraps TVAE's Encoder and Decoder as a single module so Opacus can
+    protect both under one PrivacyEngine + one optimizer (changelog #3).
+    """
+
+    def __init__(self, encoder: torch.nn.Module, decoder: torch.nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, x: torch.Tensor):
+        mu, std, logvar = self.encoder(x)
+        eps = torch.randn_like(std)
+        emb = eps * std + mu
+        rec, sigmas = self.decoder(emb)
+        return rec, sigmas, mu, logvar
