@@ -191,6 +191,36 @@ datasets:
     continuous_cols:
       - AGEP
       - WKHP
+  
+  adult:
+    raw_file:       data/raw/adult_combined.csv   # cat adult.data + adult.test (strip header line, strip trailing "." from test targets — loader also strips these defensively)
+    processed_dir:  data/processed/adult
+    synthetic_dir:  data/synthetic/adult
+    target_col:     income
+    # fnlwgt dropped inside adult_loader.py (census sampling weight, not a feature)
+    # "?" missing-value rows dropped inside adult_loader.py (~7% of rows, standard treatment)
+ 
+  churn_modelling:
+    raw_file:       data/raw/churn_modelling.csv   # Kaggle shrutimechlearn/churn-modelling
+    processed_dir:  data/processed/churn_modelling
+    synthetic_dir:  data/synthetic/churn_modelling
+    target_col:     Exited
+    # RowNumber/CustomerId/Surname dropped inside churn_modelling_loader.py
+ 
+  covertype:
+    raw_file:       data/raw/covtype.data          # only used if use_sklearn_fetch: false
+    use_sklearn_fetch: true                        # recommended: no manual download needed
+    processed_dir:  data/processed/covertype
+    synthetic_dir:  data/synthetic/covertype
+    target_col:     Cover_Type                     # 7-class — tstr.py already handles multiclass via its n_classes branch
+    subsample_n:    30000                          # paper: "randomly subsampled to 30,000 instances"
+ 
+  cardio:
+    raw_file:       data/raw/cardio_train.csv      # Kaggle sulianova/cardiovascular-disease-dataset — SEMICOLON-delimited
+    processed_dir:  data/processed/cardio
+    synthetic_dir:  data/synthetic/cardio
+    target_col:     cardio
+    subsample_n:    30000  
 
 # -----------------------------------------------------------------------------
 # Generators
@@ -254,7 +284,7 @@ evaluation:
     mia:
       model:          xgboost   # shadow model for the attacker
       n_estimators:   100
-      attack_samples: 2000      # number of train + test records fed to attacker
+      attack_samples: 10000      # number of train + test records fed to attacker
     dcr:
       sample_size:    5000      # rows to sample for distance computation (full set is slow)
     nndr:

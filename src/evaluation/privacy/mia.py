@@ -14,6 +14,15 @@ it was likely in the training set (memorisation).
 
 MIA AUC close to 0.5 → random guessing → private
 MIA AUC close to 1.0 → attacker succeeds → privacy leak
+
+CHANGE (seed-stability check): evaluate() now accepts an optional `seed`
+argument that overrides the config-level seed for a single call, without
+touching self.seed or any other evaluator's behaviour. This lets the same
+synthetic CSV be re-evaluated under several different member/non-member
+samples to check whether a reported MIA AUC is a stable signal or an
+artifact of one particular sampled subset — see
+notebooks/08_mia_seed_stability.ipynb. Calling evaluate() without `seed`
+behaves exactly as before (falls back to self.seed).
 """
 
 from __future__ import annotations
@@ -45,6 +54,7 @@ class MIAEvaluator:
         target_col: str,
         dataset_name: str,
         label: str,
+        seed: int | None = None,
     ) -> dict:
         """
         Run MIA and return AUC score.
@@ -53,18 +63,25 @@ class MIAEvaluator:
           0.5 → perfectly private (attacker can't do better than random)
           1.0 → completely compromised (attacker perfectly identifies members)
 
+        Args:
+          seed: overrides self.seed for THIS call only (member/non-member
+                sampling + shadow model random_state). Leave as None for
+                normal single-seed evaluation, identical to prior behaviour.
+
         Returns a dict with mia_auc and privacy_score (1 - 2*|auc - 0.5|)
         where privacy_score=1.0 means perfect privacy, 0.0 means no privacy.
         """
-        logger.info(f"[{dataset_name}] MIA evaluation — {label}")
+        run_seed = self.seed if seed is None else seed
+
+        logger.info(f"[{dataset_name}] MIA evaluation — {label} (seed={run_seed})")
 
         attack_samples = self.mia_config["attack_samples"]
 
         # Sample equal numbers of members and non-members
         n_each = min(attack_samples // 2, len(real_train_df), len(real_test_df))
 
-        members     = real_train_df.sample(n=n_each, random_state=self.seed)
-        non_members = real_test_df.sample(n=n_each, random_state=self.seed)
+        members     = real_train_df.sample(n=n_each, random_state=run_seed)
+        non_members = real_test_df.sample(n=n_each, random_state=run_seed)
 
         # Labels: 1 = member (was in training), 0 = non-member
         member_labels     = np.ones(n_each)
@@ -91,7 +108,7 @@ class MIAEvaluator:
         attack_model = XGBClassifier(
             n_estimators=self.mia_config["n_estimators"],
             max_depth=4,
-            random_state=self.seed,
+            random_state=run_seed,
             eval_metric="logloss",
             verbosity=0,
             use_label_encoder=False,
@@ -107,6 +124,7 @@ class MIAEvaluator:
         results = {
             "dataset":       dataset_name,
             "label":         label,
+            "seed":          run_seed,
             "mia_auc":       mia_auc,
             "privacy_score": privacy_score,
             "n_members":     n_each,
@@ -114,7 +132,7 @@ class MIAEvaluator:
         }
 
         logger.info(
-            f"[{dataset_name}] {label} — "
+            f"[{dataset_name}] {label} (seed={run_seed}) — "
             f"MIA AUC: {mia_auc:.4f}, "
             f"privacy_score: {privacy_score:.4f}"
         )
