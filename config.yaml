@@ -193,7 +193,8 @@ datasets:
       - WKHP
   
   adult:
-    raw_file:       data/raw/adult_combined.csv   # cat adult.data + adult.test (strip header line, strip trailing "." from test targets — loader also strips these defensively)
+    raw_file:       data/raw/adult.data
+    raw_file_test:  data/raw/adult.test   # cat adult.data + adult.test (strip header line, strip trailing "." from test targets — loader also strips these defensively)
     processed_dir:  data/processed/adult
     synthetic_dir:  data/synthetic/adult
     target_col:     income
